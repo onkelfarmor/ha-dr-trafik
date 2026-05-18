@@ -1,0 +1,171 @@
+# ============================================================
+# DR TRAFIK – EKSEMPEL PÅ AUTOMATIONER TIL PUSH-NOTIFIKATIONER
+# ============================================================
+#
+# Kopier relevante automationer til din automations.yaml
+# Tilpas notify-tjeneste til dit setup (fx notify.mobile_app_min_telefon)
+#
+# FORUDSÆTNING: DR Trafik integrationen er installeret og opsat.
+# ============================================================
+
+
+# ------------------------------------------------------------------
+# 1. PUSH VED ENHVER NY TRAFIKHÆNDELSE
+#    Udløses af det HA-event som integrationen affyrer ved nye meldinger
+# ------------------------------------------------------------------
+- alias: "DR Trafik – Push ved ny hændelse"
+  id: dr_trafik_push_ny_haendelse
+  description: >
+    Sender push-notifikation til mobil, hver gang der registreres en
+    ny trafikhændelse eller vejarbejde.
+  trigger:
+    - platform: event
+      event_type: dr_trafik_new_incident
+  action:
+    - service: notify.mobile_app_din_telefon        # <-- skift til dit device
+      data:
+        title: "🚦 {{ trigger.event.data.heading }}"
+        message: "{{ trigger.event.data.description }}"
+        data:
+          url: "https://www.dr.dk/trafik"
+          tag: "dr_trafik_{{ trigger.event.data.tag }}"
+          # Android: channel for trafikvarsler
+          channel: "Trafikmeldinger"
+          importance: high
+          # iOS: kritisk lyd ved blokeret vej
+          push:
+            sound: "{{ 'default' if not trigger.event.data.is_critical else 'US-EN-Morgan-Freeman-Vacate-The-Premises.wav' }}"
+
+
+# ------------------------------------------------------------------
+# 2. PUSH KUN VED KRITISKE HÆNDELSER (ulykke med spærring, vejspærring)
+# ------------------------------------------------------------------
+- alias: "DR Trafik – Push ved kritisk hændelse"
+  id: dr_trafik_push_kritisk
+  description: >
+    Sender kun notifikation ved alvorlige hændelser som ulykke med
+    spærring eller vejspærringer.
+  trigger:
+    - platform: event
+      event_type: dr_trafik_new_incident
+  condition:
+    - condition: template
+      value_template: "{{ trigger.event.data.is_critical }}"
+  action:
+    - service: notify.mobile_app_din_telefon        # <-- skift til dit device
+      data:
+        title: "⚠️ KRITISK: {{ trigger.event.data.heading }}"
+        message: "{{ trigger.event.data.description }}"
+        data:
+          url: "https://www.dr.dk/trafik"
+          tag: "dr_trafik_kritisk_{{ trigger.event.data.tag }}"
+          channel: "Trafikmeldinger Kritisk"
+          importance: max
+          ttl: 0
+          priority: high
+
+
+# ------------------------------------------------------------------
+# 3. DAGLIG MORGENBRIEFING – RESUME AF AKTIVE MELDINGER
+#    Sender et samlet overblik kl. 07:00 på hverdage
+# ------------------------------------------------------------------
+- alias: "DR Trafik – Morgenbriefing"
+  id: dr_trafik_morgenbriefing
+  description: >
+    Sender en daglig opsummering af aktive trafikmeldinger kl. 07:00
+    på hverdage, men kun hvis der ER aktive meldinger.
+  trigger:
+    - platform: time
+      at: "07:00:00"
+  condition:
+    - condition: time
+      weekday:
+        - mon
+        - tue
+        - wed
+        - thu
+        - fri
+    - condition: numeric_state
+      entity_id: sensor.dr_trafik_aktive_meldinger_i_alt   # <-- tilpas entity_id
+      above: 0
+  action:
+    - service: notify.mobile_app_din_telefon        # <-- skift til dit device
+      data:
+        title: "🚦 Trafik i dag"
+        message: >
+          {{ states('sensor.dr_trafik_aktive_meldinger_i_alt') }} aktive meldinger.
+          Seneste: {{ states('sensor.dr_trafik_seneste_melding') }}
+        data:
+          url: "https://www.dr.dk/trafik"
+          tag: "dr_trafik_morgen"
+
+
+# ------------------------------------------------------------------
+# 4. LOCARD NOTIFIKATION I HA UI (persistent_notification)
+#    Opretter en besked i HA's notifikationscenter
+# ------------------------------------------------------------------
+- alias: "DR Trafik – HA-notifikation ved ny hændelse"
+  id: dr_trafik_ha_notification
+  trigger:
+    - platform: event
+      event_type: dr_trafik_new_incident
+  action:
+    - service: persistent_notification.create
+      data:
+        title: "🚦 Ny trafikmelding"
+        message: >
+          **{{ trigger.event.data.heading }}**
+
+          {{ trigger.event.data.description }}
+
+          *Kategori: {{ trigger.event.data.entity_type }}*
+        notification_id: "dr_trafik_{{ trigger.event.data.tag }}"
+
+
+# ------------------------------------------------------------------
+# 5. ANNONCERING PÅ GOOGLE HOME / ALEXA
+#    Læser meldingen op via TTS
+# ------------------------------------------------------------------
+- alias: "DR Trafik – TTS-annoncering"
+  id: dr_trafik_tts
+  description: >
+    Annoncerer nye kritiske trafikhændelser på højttalere i hjemmet.
+  trigger:
+    - platform: event
+      event_type: dr_trafik_new_incident
+  condition:
+    - condition: template
+      value_template: "{{ trigger.event.data.is_critical }}"
+    - condition: time
+      after: "06:00:00"
+      before: "22:00:00"
+  action:
+    - service: tts.google_translate_say             # <-- brug din TTS-tjeneste
+      data:
+        entity_id: media_player.stue               # <-- dit medie-player entity
+        message: >
+          Ny trafikmelding: {{ trigger.event.data.heading }}.
+          {{ trigger.event.data.description }}
+        language: "da"
+
+
+# ------------------------------------------------------------------
+# 6. TELEGRAM-BESKED (kræver Telegram Bot integration)
+# ------------------------------------------------------------------
+- alias: "DR Trafik – Telegram-besked"
+  id: dr_trafik_telegram
+  trigger:
+    - platform: event
+      event_type: dr_trafik_new_incident
+  action:
+    - service: telegram_bot.send_message
+      data:
+        target: !secret telegram_chat_id
+        message: >
+          🚦 *Ny trafikmelding*
+
+          *{{ trigger.event.data.heading }}*
+          {{ trigger.event.data.description }}
+
+          [Se på DR Trafik](https://www.dr.dk/trafik)
+        parse_mode: markdown
